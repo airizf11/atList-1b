@@ -1,11 +1,16 @@
 // src/index.ts
 import Fastify, { FastifyInstance } from "fastify";
 import dotenv from "dotenv";
+import cors from "@fastify/cors";
 
 dotenv.config();
 
 const server: FastifyInstance = Fastify({
   logger: true,
+});
+
+server.register(cors, {
+  origin: true,
 });
 
 server.get("/", async (request, reply) => {
