@@ -1,4 +1,4 @@
-// alis1b/src/types/fastify.d.ts
+// atlist1b/src/types/fastify.d.ts
 import {
   FastifyRequest,
   FastifyReply,
@@ -30,7 +30,7 @@ declare module "@fastify/jwt" {
       email: string;
       iat: number;
       exp: number;
-      // Tambahkan lain jika ada
+      // Tambah lain jika ada
     };
   }
 }

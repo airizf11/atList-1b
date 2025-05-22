@@ -1,4 +1,4 @@
-// alis1b/src/utils/supabaseClient.ts
+// atlist1b/src/utils/supabaseClient.ts
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 

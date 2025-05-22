@@ -1,4 +1,4 @@
-// alis1b/src/routes/auth.routes.ts
+// atlist1b/src/routes/auth.routes.ts
 import {
   FastifyInstance,
   FastifyPluginOptions,
@@ -9,7 +9,7 @@ import { google } from "googleapis";
 import { supabase } from "../utils/supabaseClient";
 import { encrypt, decrypt } from "../utils/crypto";
 
-// Inisialisasi OAuth2 di sini atau import dari service/config
+// Inisialisasi OAuth2 sini or impor dari service/config
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,

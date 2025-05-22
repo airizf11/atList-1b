@@ -1,4 +1,4 @@
-// alis1b/src/routes/user.routes.ts
+// atlist1b/src/routes/user.routes.ts
 import {
   FastifyInstance,
   FastifyPluginOptions,
@@ -20,11 +20,9 @@ export default async function userRoutes(
       const userPayload = request.user;
 
       if (!userPayload || !userPayload.userId) {
-        return reply
-          .status(401)
-          .send({
-            error: "Unauthorized: User payload not found after authentication",
-          });
+        return reply.status(401).send({
+          error: "Unauthorized: User payload not found after authentication",
+        });
       }
 
       try {

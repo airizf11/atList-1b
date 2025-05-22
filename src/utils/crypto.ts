@@ -1,4 +1,4 @@
-// alis1b/src/utils/crypto.ts
+// atlist1b/src/utils/crypto.ts
 import crypto from "crypto";
 
 const ALGORITHM = "aes-256-cbc";
@@ -12,7 +12,9 @@ if (ENCRYPTION_KEY.length !== 32 && process.env.ENCRYPTION_KEY) {
     "ENCRYPTION_KEY must be 32 bytes (64 hex characters). Current length:",
     ENCRYPTION_KEY.length
   );
-  // throw new Error('Invalid ENCRYPTION_KEY length. Must be 32 bytes (64 hex characters).');
+  throw new Error(
+    "Invalid ENCRYPTION_KEY length. Must be 32 bytes (64 hex characters)."
+  );
 }
 
 export function encrypt(text: string): string {
