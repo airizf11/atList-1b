@@ -10,6 +10,7 @@ import dotenv from "dotenv";
 import authRoutes from "./routes/auth.routes";
 import userRoutes from "./routes/user.routes";
 import streamRoutes from "./routes/stream.routes";
+import settingsRoutes from "./routes/settings.routes";
 // import "./types/fastify.d.ts";
 
 dotenv.config();
@@ -20,6 +21,7 @@ export function build(opts = {}): FastifyInstance {
   server.register(cors, {
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   });
 
   const jwtSecret = process.env.JWT_SECRET;
@@ -45,6 +47,7 @@ export function build(opts = {}): FastifyInstance {
   server.register(authRoutes, { prefix: "/auth" });
   server.register(userRoutes, { prefix: "/api" });
   server.register(streamRoutes, { prefix: "/api" });
+  server.register(settingsRoutes, { prefix: "/api" });
 
   server.get("/api/test", async (request, reply) => {
     return {

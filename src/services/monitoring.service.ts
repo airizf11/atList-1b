@@ -5,7 +5,8 @@ import {
   getLiveChatId,
   fetchLiveChatMessages,
 } from "./google.service";
-import type { Auth } from "googleapis";
+import { sendToDiscord } from "./discord.service";
+import type { Auth, youtube_v3 } from "googleapis";
 
 interface MonitorSession {
   id: string;
@@ -16,31 +17,67 @@ interface MonitorSession {
   oauth2Client: Auth.OAuth2Client;
   isActive: boolean;
   pollIntervalId?: NodeJS.Timeout;
+  discordWebhookUrl?: string | null;
 }
 
 const activeServerSessions: Map<string, MonitorSession> = new Map();
 
-async function processChatMessages(session: MonitorSession, messages: any[]) {
-  if (messages.length > 0) {
-    console.log(
-      `[${session.userId} - ${session.videoId}] Fetched ${messages.length} new messages:`
-    );
-    messages.forEach((msg) => {
-      console.log(
-        `  [${msg.authorDetails?.displayName}]: ${msg.snippet?.displayMessage}`
+async function processChatMessages(
+  session: MonitorSession,
+  messages: youtube_v3.Schema$LiveChatMessage[]
+) {
+  if (messages.length === 0) return;
+
+  console.log(
+    `[${session.userId} - ${session.videoId}] Processing ${messages.length} new messages:`
+  );
+
+  if (!session.discordWebhookUrl && session.userId) {
+    const { data: userData, error: userError } = await supabase
+      .from("users")
+      .select("discord_webhook_url")
+      .eq("id", session.userId)
+      .single();
+
+    if (userError) {
+      console.error(
+        `[${session.id}] Error fetching user data for Discord webhook:`,
+        userError.message
       );
-      // TODO: Kirim ke Discord Webhook
-      // TODO: Proses untuk moderasi
-    });
+    } else {
+      session.discordWebhookUrl = userData?.discord_webhook_url ?? null;
+    }
+  }
+
+  for (const msg of messages) {
+    const authorName = msg.authorDetails?.displayName || "Unknown User";
+    const messageContent = msg.snippet?.displayMessage || "";
+    const authorAvatarUrl = msg.authorDetails?.profileImageUrl;
+
+    console.log(`  [${authorName}]: ${messageContent}`);
+
+    if (session.discordWebhookUrl) {
+      const success = await sendToDiscord(
+        session.discordWebhookUrl,
+        authorName,
+        messageContent,
+        authorAvatarUrl ?? undefined,
+        session.videoId
+      );
+      if (!success) {
+        console.warn(
+          `[${session.id}] Failed to send message from ${authorName} to Discord.`
+        );
+      }
+    }
+    // TODO: Moderation logic
   }
 }
 
 async function pollMessages(sessionId: string) {
   const session = activeServerSessions.get(sessionId);
   if (!session || !session.isActive) {
-    console.log(
-      `Polling stopped for session ${sessionId} as it's no longer active or found.`
-    );
+    console.log(`Polling stopped for session ${sessionId}.`);
     if (session?.pollIntervalId) clearTimeout(session.pollIntervalId);
     activeServerSessions.delete(sessionId);
     return;
@@ -79,41 +116,41 @@ async function pollMessages(sessionId: string) {
         interval
       );
     } else {
-      console.warn(
-        `[${sessionId}] No chat data received, but no critical error. Retrying in 15s.`
-      );
+      console.warn(`[${sessionId}] No chat data received. Retrying in 15s.`);
       session.pollIntervalId = setTimeout(() => pollMessages(sessionId), 15000);
     }
   } catch (pollError: any) {
     console.error(`[${sessionId}] Error during polling: ${pollError.message}`);
-    let retryDelay = 30000;
 
-    if (pollError.message === "LIVE_CHAT_DISABLED") {
+    let retryDelay = 30000;
+    const errorMsg = pollError.message?.toLowerCase() || "";
+
+    if (errorMsg.includes("live_chat_disabled")) {
       console.warn(
         `Live chat disabled for session ${sessionId}. Stopping monitoring.`
       );
       await stopMonitoring(session.userId, session.videoId);
       return;
-    } else if (
-      pollError.message.includes("token") ||
-      pollError.message.includes("auth")
-    ) {
+    }
+
+    if (errorMsg.includes("token") || errorMsg.includes("auth")) {
       console.log(
-        `[${sessionId}] Token error, attempting to re-authenticate client...`
+        `[${sessionId}] Token/auth error. Attempting re-authentication...`
       );
       const newAuthClient = await getAuthenticatedClient(session.userId);
       if (newAuthClient) {
         session.oauth2Client = newAuthClient;
         retryDelay = 5000;
-        console.log(`[${sessionId}] Re-authenticated, will retry polling.`);
+        console.log(`[${sessionId}] Re-authenticated. Retrying polling.`);
       } else {
         console.error(
-          `[${sessionId}] Failed to re-authenticate. Stopping monitoring.`
+          `[${sessionId}] Re-authentication failed. Stopping monitoring.`
         );
         await stopMonitoring(session.userId, session.videoId);
         return;
       }
     }
+
     session.pollIntervalId = setTimeout(
       () => pollMessages(sessionId),
       retryDelay
@@ -124,40 +161,33 @@ async function pollMessages(sessionId: string) {
 export async function startMonitoring(
   userId: string,
   videoId: string
-): Promise<{
-  success: boolean;
-  message: string;
-  sessionId?: string;
-}> {
-  // sementara simplifikasi 1 user 1 monitoring
-  const { data: existingMonitors, error: fetchExistingError } = await supabase
+): Promise<{ success: boolean; message: string; sessionId?: string }> {
+  const { data: existingMonitors, error: fetchError } = await supabase
     .from("active_monitors")
     .select("id, video_id")
     .eq("user_id", userId)
     .eq("is_active", true);
 
-  if (fetchExistingError) {
+  if (fetchError) {
     console.error(
-      `Error fetching existing monitors for user ${userId}:`,
-      fetchExistingError.message
+      `Error fetching monitors for user ${userId}:`,
+      fetchError.message
     );
     return { success: false, message: "Failed to check existing monitors." };
   }
 
-  if (existingMonitors && existingMonitors.length > 0) {
-    for (const monitor of existingMonitors) {
-      console.log(
-        `Stopping existing active monitor ${monitor.id} for video ${monitor.video_id} for user ${userId}.`
-      );
-      await stopMonitoring(userId, monitor.video_id, monitor.id);
-    }
+  for (const monitor of existingMonitors || []) {
+    console.log(
+      `Stopping existing monitor ${monitor.id} for video ${monitor.video_id}`
+    );
+    await stopMonitoring(userId, monitor.video_id, monitor.id);
   }
 
   const oauth2Client = await getAuthenticatedClient(userId);
   if (!oauth2Client) {
     return {
       success: false,
-      message: "Failed to authenticate with Google. Please re-login.",
+      message: "Google authentication failed. Please re-login.",
     };
   }
 
@@ -165,7 +195,7 @@ export async function startMonitoring(
   if (!liveChatId) {
     return {
       success: false,
-      message: `Could not find active live chat for video ${videoId}. Ensure it's live with chat enabled.`,
+      message: "No active live chat found for this video.",
     };
   }
 
@@ -182,19 +212,12 @@ export async function startMonitoring(
     .single();
 
   if (insertError || !newMonitor) {
-    console.error(
-      `Error creating monitor session for user ${userId}, video ${videoId}:`,
-      insertError?.message
-    );
-    return {
-      success: false,
-      message: "Failed to create monitoring session in database.",
-    };
+    console.error(`Error creating monitor session:`, insertError?.message);
+    return { success: false, message: "Failed to create monitoring session." };
   }
 
   const sessionId = newMonitor.id;
-
-  const newServerSession: MonitorSession = {
+  const session: MonitorSession = {
     id: sessionId,
     userId,
     videoId,
@@ -202,16 +225,16 @@ export async function startMonitoring(
     oauth2Client,
     isActive: true,
   };
-  activeServerSessions.set(sessionId, newServerSession);
+  activeServerSessions.set(sessionId, session);
 
   console.log(
-    `Monitoring session ${sessionId} started for user ${userId}, video ${videoId}. Live Chat ID: ${liveChatId}`
+    `Monitoring started: session ${sessionId}, user ${userId}, video ${videoId}`
   );
   pollMessages(sessionId);
 
   return {
     success: true,
-    message: `Monitoring started for video ${videoId}. Session ID: ${sessionId}`,
+    message: `Monitoring started for video ${videoId}`,
     sessionId,
   };
 }
@@ -221,10 +244,10 @@ export async function stopMonitoring(
   videoId?: string,
   sessionId?: string
 ): Promise<{ success: boolean; message: string }> {
-  let monitorIdToStop: string | undefined = sessionId;
+  let monitorId = sessionId;
 
-  if (!monitorIdToStop && videoId) {
-    const { data: monitor, error: findError } = await supabase
+  if (!monitorId && videoId) {
+    const { data, error } = await supabase
       .from("active_monitors")
       .select("id")
       .eq("user_id", userId)
@@ -232,30 +255,23 @@ export async function stopMonitoring(
       .eq("is_active", true)
       .single();
 
-    if (findError && findError.code !== "PGRST116") {
-      console.error(
-        `Error finding monitor to stop for user ${userId}, video ${videoId}:`,
-        findError.message
-      );
+    if (error && error.code !== "PGRST116") {
+      console.error(`Error finding monitor to stop:`, error.message);
       return { success: false, message: "Error finding active monitor." };
     }
-    if (monitor) monitorIdToStop = monitor.id;
+
+    monitorId = data?.id;
   }
 
-  if (!monitorIdToStop) {
-    return {
-      success: false,
-      message:
-        "No active monitoring session found to stop for the given criteria.",
-    };
+  if (!monitorId) {
+    return { success: false, message: "No active session found to stop." };
   }
 
-  const serverSession = activeServerSessions.get(monitorIdToStop);
-  if (serverSession) {
-    serverSession.isActive = false;
-    if (serverSession.pollIntervalId)
-      clearTimeout(serverSession.pollIntervalId);
-    activeServerSessions.delete(monitorIdToStop);
+  const session = activeServerSessions.get(monitorId);
+  if (session) {
+    session.isActive = false;
+    if (session.pollIntervalId) clearTimeout(session.pollIntervalId);
+    activeServerSessions.delete(monitorId);
   }
 
   const { error: updateError } = await supabase
@@ -264,80 +280,61 @@ export async function stopMonitoring(
       is_active: false,
       stopped_at: new Date().toISOString(),
     })
-    .eq("id", monitorIdToStop)
+    .eq("id", monitorId)
     .eq("user_id", userId);
 
   if (updateError) {
-    console.error(
-      `Error stopping monitor session ${monitorIdToStop} in DB:`,
-      updateError.message
-    );
-    return {
-      success: false,
-      message: "Failed to update monitoring session in database.",
-    };
+    console.error(`Error stopping session ${monitorId}:`, updateError.message);
+    return { success: false, message: "Failed to stop session in database." };
   }
 
-  console.log(
-    `Monitoring session ${monitorIdToStop} stopped for user ${userId}.`
-  );
-  return {
-    success: true,
-    message: `Monitoring stopped for session ${monitorIdToStop}.`,
-  };
+  console.log(`Monitoring session ${monitorId} stopped for user ${userId}.`);
+  return { success: true, message: `Monitoring stopped.` };
 }
 
 export async function resumeActiveMonitorsOnStartup() {
-  console.log("Checking for active monitors to resume...");
-  const { data: activeDbSessions, error } = await supabase
+  console.log("Resuming active monitor sessions...");
+  const { data, error } = await supabase
     .from("active_monitors")
     .select("*")
     .eq("is_active", true);
 
   if (error) {
-    console.error("Error fetching active monitors on startup:", error.message);
+    console.error("Error fetching monitors on startup:", error.message);
     return;
   }
 
-  if (activeDbSessions && activeDbSessions.length > 0) {
-    for (const dbSession of activeDbSessions) {
-      if (activeServerSessions.has(dbSession.id)) {
-        console.log(
-          `Session ${dbSession.id} is already being managed in memory.`
-        );
-        continue;
-      }
-      console.log(
-        `Resuming monitoring for session ${dbSession.id} (user: ${dbSession.user_id}, video: ${dbSession.video_id})`
+  for (const dbSession of data || []) {
+    if (activeServerSessions.has(dbSession.id)) continue;
+
+    console.log(
+      `Resuming session ${dbSession.id} for user ${dbSession.user_id}`
+    );
+
+    const oauth2Client = await getAuthenticatedClient(dbSession.user_id);
+    if (oauth2Client) {
+      const session: MonitorSession = {
+        id: dbSession.id,
+        userId: dbSession.user_id,
+        videoId: dbSession.video_id,
+        youtubeLiveChatId: dbSession.youtube_live_chat_id,
+        nextPageToken: dbSession.next_page_token,
+        oauth2Client,
+        isActive: true,
+      };
+      activeServerSessions.set(dbSession.id, session);
+      pollMessages(dbSession.id);
+    } else {
+      console.warn(
+        `Failed to resume session ${dbSession.id}: authentication error.`
       );
-      const oauth2Client = await getAuthenticatedClient(dbSession.user_id);
-      if (oauth2Client) {
-        const serverSession: MonitorSession = {
-          id: dbSession.id,
-          userId: dbSession.user_id,
-          videoId: dbSession.video_id,
-          youtubeLiveChatId: dbSession.youtube_live_chat_id,
-          nextPageToken: dbSession.next_page_token,
-          oauth2Client,
-          isActive: true,
-        };
-        activeServerSessions.set(dbSession.id, serverSession);
-        pollMessages(dbSession.id);
-      } else {
-        console.warn(
-          `Could not resume session ${dbSession.id}: failed to get authenticated client.`
-        );
-        await supabase
-          .from("active_monitors")
-          .update({
-            is_active: false,
-            last_error_message: "Failed to re-authenticate on startup",
-          })
-          .eq("id", dbSession.id);
-      }
+      await supabase
+        .from("active_monitors")
+        .update({
+          is_active: false,
+          last_error_message: "Failed to re-authenticate on startup",
+        })
+        .eq("id", dbSession.id);
     }
-    console.log(`Resumed ${activeDbSessions.length} active monitors.`);
-  } else {
-    console.log("No active monitors to resume.");
   }
 }
