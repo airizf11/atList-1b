@@ -10,6 +10,11 @@ import {
   stopMonitoring,
 } from "../services/monitoring.service";
 import { supabase } from "../utils/supabaseClient";
+import { google } from "googleapis";
+import {
+  getAuthenticatedClient,
+  getLiveChatId,
+} from "../services/google.service";
 
 export default async function streamRoutes(
   server: FastifyInstance,
@@ -172,6 +177,94 @@ export default async function streamRoutes(
           error: "Failed to get stream monitoring status.",
           details: error.message,
         });
+      }
+    }
+  );
+  server.post(
+    "/stream/send-message",
+    {
+      onRequest: [server.authenticate],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const user = request.user;
+      if (!user || !user.userId) {
+        return reply
+          .status(401)
+          .send({ error: "User not authenticated properly." });
+      }
+      const userId = user.userId;
+
+      const body = request.body as { videoId?: string; messageText?: string };
+      if (
+        !body.videoId ||
+        !body.messageText ||
+        body.messageText.trim() === ""
+      ) {
+        return reply
+          .status(400)
+          .send({ error: "Missing videoId or messageText." });
+      }
+      const { videoId, messageText } = body;
+
+      try {
+        server.log.info(
+          `[SENDMSG] User ${userId} sending to video ${videoId}: "${messageText}"`
+        );
+        const oauth2Client = await getAuthenticatedClient(userId);
+        if (!oauth2Client) {
+          return reply
+            .status(401)
+            .send({
+              error: "Failed to authenticate with Google. Please re-login.",
+            });
+        }
+
+        const liveChatId = await getLiveChatId(oauth2Client, videoId);
+        if (!liveChatId) {
+          return reply
+            .status(404)
+            .send({
+              error: `Could not find active live chat for video ${videoId}.`,
+            });
+        }
+
+        const youtube = google.youtube({ version: "v3", auth: oauth2Client });
+        const response = await youtube.liveChatMessages.insert({
+          part: ["snippet"],
+          requestBody: {
+            snippet: {
+              liveChatId: liveChatId,
+              type: "textMessageEvent",
+              textMessageDetails: {
+                messageText: messageText,
+              },
+            },
+          },
+        });
+
+        server.log.info(
+          `[SENDMSG] Message sent successfully by ${userId} to ${videoId}. Message ID: ${response.data.id}`
+        );
+        reply.send({
+          success: true,
+          message: "Message sent successfully!",
+          sentMessage: response.data,
+        });
+      } catch (error: any) {
+        server.log.error(
+          { err: error, userId, videoId },
+          "[SENDMSG] Error sending message"
+        );
+        const googleError = error.response?.data?.error;
+        if (googleError) {
+          return reply.status(googleError.code || 500).send({
+            error: `Google API Error: ${googleError.message}`,
+            details: googleError.errors,
+          });
+        }
+        reply
+          .status(500)
+          .send({ error: "Failed to send message.", details: error.message });
       }
     }
   );
